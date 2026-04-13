@@ -10,17 +10,29 @@
 #define SET_READ 0
 #define BUFFER_ALIGN 4096 
 #define BLOCK_SIZE 1048576 //1MB buffer size for I/O operations
+#define SECTOR_SIZE 512
+
 
 typedef struct{
     int fd; //file descriptor for the job
     void *buf; 
-    uint32_t bytes_done; //bytes completed so far
+    uint64_t bytes_done; //bytes completed so far
     volatile int stop; //flag to signal the job to stop
     perfJobInfo_t info; //info about the job
     int is_write; //flag to indicate if it is a write job
 } job_state;
 
 static job_state *current_job = NULL; //pointer to the currently running job, NULL if no job is running
+
+/**
+ * @brief Get the current time in milliseconds
+ */
+static uint64_t current_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /**
  * @brief returns some sort of status/state of perf business. 
@@ -37,6 +49,16 @@ int getPerfStatus(){
 status_t initPerfSystem(){
 
     return STATUS_OK;
+}
+
+
+/*
+
+*/
+
+static void run_job(job_state *j)
+{
+    uint64_t base_offset = (uint32_t)   
 }
 
 /**
@@ -91,6 +113,14 @@ status_t perfStartSeqWrite(perfJobInfo_t* info){
     return STATUS_OK;
 }
 
+/**
+ * @brief Starts listed operation, taking in info about the job
+ * function name: perfStartSeqRead
+ * description:   Starts a sequential read job with the given parameters. Will run until duration_ms is up or until perfStopJob is called, whichever comes first.
+ * parameters:    perfJobInfo_t* info - pointer to struct containing info about the job, including LBA range and duration      
+ * Returns:       STATUS_FAIL if job cannot be started for some reason (invalid input, job already running, etc)
+ *                STATUS_OK if job is successfully started
+ */
 status_t perfStartSeqRead(perfJobInfo_t* info){
     if(info == NULL){
         return STATUS_FAIL;
