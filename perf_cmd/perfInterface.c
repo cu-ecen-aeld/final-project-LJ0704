@@ -35,30 +35,89 @@ static uint64_t current_ms(void)
 }
 
 /**
+ * @brief Set up perf system. Whatever would need to be run once before we call into it repeatedly
+ */
+status_t initPerfSystem(){
+    current_job = NULL;
+    return STATUS_OK;
+}
+
+/**
  * @brief returns some sort of status/state of perf business. 
  * Probably something along the lines of (ready, fault, running (if running, print some stats?))
  */
 int getPerfStatus(){
-    
-    return 0;
+    if (current_job == NULL){
+        return 0;
+    }
+    return 1;
 }
 
-/**
- * @brief Set up perf system. Whatever would need to be run once before we call into it repeatedly
- */
-status_t initPerfSystem(){
 
-    return STATUS_OK;
-}
+
 
 
 /*
 
 */
 
-static void run_job(job_state *j)
+static void run_job(job_state *job)
 {
-    uint64_t base_offset = (uint32_t)   
+    uint64_t base_offset = (uint64_t)job->info.lbaRange.startlba * SECTOR_SIZE;
+    uint64_t end_offset = (uint64_t)job->info.lbaRange.endlba * SECTOR_SIZE;
+    uint64_t offset = base_offset;
+    uint64_t start_time = current_ms();
+
+    lseek(job->fd, (off_t)base_offset, SEEK_SET);
+
+    while(!job->stop){
+        if((job->info.duration_ms > 0) && ((current_ms() - start_time) >= job->info.duration_ms)){
+            break;
+        }
+        // Perform I/O operation 
+        if(offset + BLOCK_SIZE > end_offset){
+            // If the next block would go past the end of the range, wrap around to the start
+            offset = base_offset;
+            lseek(job->fd, (off_t)base_offset, SEEK_SET);
+        }
+        ssize_t io_size;
+        if(job->is_write){
+            io_size = write_unaligned(job->fd, offset, offset + BLOCK_SIZE, job->buf);
+            if(io_size < 0){
+                fprintf(stderr, "[perf] : Write I/O error at offset %lu : %s\n", offset, strerror(errno));
+                break;
+            }
+            offset += BLOCK_SIZE;
+        } else {
+            io_size = read(job->fd, job->buf, BLOCK_SIZE);
+            if(io_size < 0){
+                fprintf(stderr, "[perf] : Read I/O error at offset %lu : %s\n", offset, strerror(errno));
+                break;
+            }
+            offset += (uint64_t)io_size;
+            if (offset + BLOCK_SIZE > end_offset) {
+                offset = base_offset;
+                lseek(job->fd, (off_t)base_offset, SEEK_SET);
+            }
+        }
+
+        job->bytes_done += (uint64_t)io_size;
+    }
+
+    uint64_t total_time = current_ms() - start_time;
+    if(total_time == 0){
+        total_time = 1; //prevent division by zero
+    }
+
+    double mb          = (double)job->bytes_done / (1024.0 * 1024.0);
+    double elapsed_sec = (double)total_time / 1000.0;
+
+    printf("[perf] %s  |  %.2f MiB  |  %.2f MB/s\n",
+           job->is_write ? "SEQ WRITE" : "SEQ READ",
+           mb,
+           mb / elapsed_sec);
+
+    close(job->fd);
 }
 
 /**
@@ -72,7 +131,7 @@ static void run_job(job_state *j)
 status_t perfStartSeqWrite(perfJobInfo_t* info){
     if(info == NULL){
         return STATUS_FAIL;
-    }
+    } 
     if(current_job != NULL){
         return STATUS_FAIL;
     }
@@ -147,6 +206,7 @@ status_t perfStartSeqRead(perfJobInfo_t* info){
         return STATUS_FAIL;
     }
 
+    
     if(posix_memalign(&new_job->buf, BUFFER_ALIGN, BLOCK_SIZE) != 0){
         fprintf(stderr, "[perf] : Failed to allocate aligned buffer for sequential reads : %s\n", strerror(errno));
         close(new_job->fd);
@@ -184,5 +244,15 @@ status_t perfStartRandRead(perfJobInfo_t* info){
  */
 status_t perfStopJob(){
 
+        if(current_job == NULL){
+            return STATUS_NO_JOB;
+        }
+        current_job->stop = 1;
+
+        free(current_job->buf);
+        close(current_job->fd);
+        free(current_job);
+        current_job = NULL;
+            
     return STATUS_OK;
 }
