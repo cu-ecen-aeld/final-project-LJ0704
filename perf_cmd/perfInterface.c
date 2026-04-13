@@ -66,15 +66,15 @@ status_t perfStartSeqWrite(perfJobInfo_t* info){
     new_job->info = *info;
     new_job->is_write = SET_WRITE;
     
-    new_job->fd = open("/dev/nvme0n1", O_WRONLY | O_DIRECT);
+    new_job->fd = open("/dev/nvme0n1", O_RDWR  | O_DIRECT);
     if(new_job->fd < 0){
-        fprintf(stderr, "Failed to open device for sequential writes : %s\n", strerror(errno));
+        fprintf(stderr, "[perf] : Failed to open device for sequential writes : %s\n", strerror(errno));
         free(new_job);
         return STATUS_FAIL;
     }
 
     if(posix_memalign(&new_job->buf, BUFFER_ALIGN, BLOCK_SIZE) != 0){
-        fprintf(stderr, "Failed to allocate aligned buffer for sequential writes : %s\n", strerror(errno));
+        fprintf(stderr, "[perf] : Failed to allocate aligned buffer for sequential writes : %s\n", strerror(errno));
         close(new_job->fd);
         free(new_job);
         return STATUS_FAIL;
@@ -95,9 +95,44 @@ status_t perfStartSeqRead(perfJobInfo_t* info){
     if(info == NULL){
         return STATUS_FAIL;
     }
+    if(current_job != NULL){
+        return STATUS_FAIL;
+    }
+    if(info->lbaRange.endlba <= info->lbaRange.startlba){
+        return STATUS_FAIL;
+    }
+
+    job_state *new_job = calloc(1, sizeof(*new_job));
+    if(new_job == NULL){
+        return STATUS_FAIL;
+    }
+
+    new_job->info = *info;
+    new_job->is_write = SET_READ;
+    
+    new_job->fd = open("/dev/nvme0n1", O_RDONLY  | O_DIRECT);
+    if(new_job->fd < 0){
+        fprintf(stderr, "[perf] : Failed to open device for sequential reads : %s\n", strerror(errno));
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    if(posix_memalign(&new_job->buf, BUFFER_ALIGN, BLOCK_SIZE) != 0){
+        fprintf(stderr, "[perf] : Failed to allocate aligned buffer for sequential reads : %s\n", strerror(errno));
+        close(new_job->fd);
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    new_job->bytes_done = 0;
+    new_job->stop = 0;
+    current_job = new_job;
+
+    run_job(current_job);
 
     return STATUS_OK;
 }
+
 status_t perfStartRandWrite(perfJobInfo_t *info){
     if(info == NULL){
         return STATUS_FAIL;
