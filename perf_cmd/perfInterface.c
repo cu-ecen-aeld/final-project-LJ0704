@@ -242,7 +242,12 @@ static void run_job(job_state *job)
            mb,
            mb / elapsed_sec);
 
+    free(job->buf);
+    job->buf = NULL;
     close(job->fd);
+    job->fd = -1;
+    free(job);
+    current_job = NULL;
 }
 
 /**
