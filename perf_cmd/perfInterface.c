@@ -53,13 +53,136 @@ int getPerfStatus(){
     return 1;
 }
 
+/***********************/
+/**
+ * @brief Performs a Read-Modify-Write on a single sector.
+ *
+ * Reads the sector at sector_off, patches bytes [patch_start, patch_end)
+ * with src, then writes the sector back.
+ *
+ * @param fd          open file descriptor
+ * @param sector_off  byte offset of the sector on device (must be SECTOR_SIZE aligned)
+ * @param patch_start byte offset within sector to begin patching
+ * @param patch_end   byte offset within sector to end patching (exclusive)
+ * @param src         source data to patch in
+ * @return            number of bytes patched on success, -1 on error
+ */
+static ssize_t rmw_sector(int fd, uint64_t sector_off,
+                           uint32_t patch_start, uint32_t patch_end,
+                           const void *src)
+{
+    void *sector_buf;
+    if (posix_memalign(&sector_buf, BUFFER_ALIGN, SECTOR_SIZE) != 0) {
+        fprintf(stderr, "[perf] rmw_sector: alloc failed\n");
+        return -1;
+    }
 
+    ssize_t ret = pread(fd, sector_buf, SECTOR_SIZE, (off_t)sector_off);
+    if (ret != SECTOR_SIZE) {
+        fprintf(stderr, "[perf] rmw_sector: pread failed: %s\n", strerror(errno));
+        free(sector_buf);
+        return -1;
+    }
 
+    uint32_t patch_len = patch_end - patch_start;
+    memcpy((uint8_t *)sector_buf + patch_start, src, patch_len);
 
+    ret = pwrite(fd, sector_buf, SECTOR_SIZE, (off_t)sector_off);
+    if (ret != SECTOR_SIZE) {
+        fprintf(stderr, "[perf] rmw_sector: pwrite failed: %s\n", strerror(errno));
+        free(sector_buf);
+        return -1;
+    }
 
-/*
+    free(sector_buf);
+    return (ssize_t)patch_len;
+}
 
-*/
+/**
+ * @brief Writes data handling unaligned head and tail sectors via RMW.
+ *
+ * Layout:
+ *   [start_byte .......................................... end_byte)
+ *   |-- head RMW --|-- aligned bulk writes --|-- tail RMW --|
+ *
+ * @param fd         open file descriptor
+ * @param start_byte byte offset to begin writing
+ * @param end_byte   byte offset to stop writing (exclusive)
+ * @param src        source buffer
+ * @return           total bytes written on success, -1 on error
+ */
+static ssize_t write_unaligned(int fd, uint64_t start_byte, uint64_t end_byte,
+                                const void *src)
+{
+    if (start_byte >= end_byte) return 0;
+
+    const uint8_t *data   = src;
+    uint64_t       total  = 0;
+    uint64_t       cursor = start_byte;
+
+    /* ── head: partial first sector ─────────────────────────────────────── */
+    uint32_t head_off = cursor % SECTOR_SIZE;
+    if (head_off != 0) {
+        uint64_t sector_base     = cursor - head_off;
+        uint32_t bytes_in_sector = SECTOR_SIZE - head_off;
+        uint32_t patch_len       = (uint32_t)(end_byte - cursor);
+        if (patch_len > bytes_in_sector)
+            patch_len = bytes_in_sector;
+
+        ssize_t done = rmw_sector(fd, sector_base,
+                                  head_off, head_off + patch_len,
+                                  data);
+        if (done < 0) return -1;
+
+        total  += (uint64_t)done;
+        cursor += (uint64_t)done;
+        data   += done;
+    }
+
+    /* ── middle: full aligned sectors ───────────────────────────────────── */
+    while (cursor + SECTOR_SIZE <= end_byte) {
+        uint64_t remaining = end_byte - cursor;
+        uint64_t chunk     = remaining < BLOCK_SIZE ? remaining : BLOCK_SIZE;
+        chunk = (chunk / SECTOR_SIZE) * SECTOR_SIZE;
+        if (chunk == 0) break;
+
+        void *aligned_buf;
+        if (posix_memalign(&aligned_buf, BUFFER_ALIGN, chunk) != 0) {
+            fprintf(stderr, "[perf] write_unaligned: alloc failed\n");
+            return -1;
+        }
+
+        memcpy(aligned_buf, data, chunk);
+
+        ssize_t ret = pwrite(fd, aligned_buf, chunk, (off_t)cursor);
+        free(aligned_buf);
+
+        if (ret < 0) {
+            fprintf(stderr, "[perf] write_unaligned: pwrite failed: %s\n", strerror(errno));
+            return -1;
+        }
+
+        total  += (uint64_t)ret;
+        cursor += (uint64_t)ret;
+        data   += ret;
+    }
+
+    /* ── tail: partial last sector ──────────────────────────────────────── */
+    if (cursor < end_byte) {
+        uint32_t patch_len = (uint32_t)(end_byte - cursor);
+
+        ssize_t done = rmw_sector(fd, cursor,
+                                  0, patch_len,
+                                  data);
+        if (done < 0) return -1;
+
+        total += (uint64_t)done;
+    }
+
+    return (ssize_t)total;
+}
+
+/* ***************************/
 
 static void run_job(job_state *job)
 {
