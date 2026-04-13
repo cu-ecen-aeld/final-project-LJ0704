@@ -1,7 +1,7 @@
 /*
     @file commandQueue.h
     @Author Zane Mcmorris
-    @date March 30, 2026
+    @date March 30, 2026.
 */
 
 #ifndef INTERFACE_COMMON_H
