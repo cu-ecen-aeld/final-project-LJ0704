@@ -19,7 +19,7 @@ typedef enum{
     ERROR_EMPTY_QUEUE = -4,
     ERROR_RE_INIT = -5,
     ERROR_NO_INIT = -6,
-}error_t;
+}app_error_t;
 
 typedef enum{
     STATUS_OK = 0,

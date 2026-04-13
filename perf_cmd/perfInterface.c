@@ -4,6 +4,8 @@
     @date April 1, 2026
 */
 
+#define _GNU_SOURCE
+
 #include "perfInterface.h"
 
 #define SET_WRITE 1
