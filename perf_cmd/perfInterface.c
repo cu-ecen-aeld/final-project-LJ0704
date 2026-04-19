@@ -4,8 +4,6 @@
     @date April 1, 2026
 */
 
-#define _GNU_SOURCE
-
 #include "perfInterface.h"
 
 #define SET_WRITE 1
@@ -14,6 +12,12 @@
 #define BLOCK_SIZE 1048576 //1MB buffer size for I/O operations
 #define SECTOR_SIZE 512
 
+typedef enum{
+    JOB_SEQ_WRITE,
+    JOB_SEQ_READ,
+    JOB_RAND_WRITE,
+    JOB_RAND_READ,
+}job_type_t;
 
 typedef struct{
     int fd; //file descriptor for the job
@@ -21,7 +25,8 @@ typedef struct{
     uint64_t bytes_done; //bytes completed so far
     volatile int stop; //flag to signal the job to stop
     perfJobInfo_t info; //info about the job
-    int is_write; //flag to indicate if it is a write job
+  //  int is_write; //flag to indicate if it is a write job
+    job_type_t type; //type of the job
 } job_state;
 
 static job_state *current_job = NULL; //pointer to the currently running job, NULL if no job is running
@@ -53,6 +58,17 @@ int getPerfStatus(){
         return 0;
     }
     return 1;
+}
+
+static const char *job_type_label(job_type_t type)
+{
+    switch(type){
+        case JOB_SEQ_WRITE:  return "SEQ WRITE";
+        case JOB_SEQ_READ:   return "SEQ READ";
+        case JOB_RAND_WRITE: return "RAND WRITE";
+        case JOB_RAND_READ:  return "RAND READ";
+        default:             return "UNKNOWN";
+    }
 }
 
 /***********************/
@@ -184,6 +200,13 @@ static ssize_t write_unaligned(int fd, uint64_t start_byte, uint64_t end_byte,
     return (ssize_t)total;
 }
 
+
+static uint64_t random_aligned_offset(uint64_t base_offset, uint64_t end_offset)
+{
+    uint64_t range_sectors = (end_offset - base_offset - BLOCK_SIZE) / SECTOR_SIZE;
+    return base_offset + ((uint64_t)rand() % (range_sectors + 1)) * SECTOR_SIZE;
+}
+
 /* ***************************/
 
 static void run_job(job_state *job)
@@ -192,42 +215,73 @@ static void run_job(job_state *job)
     uint64_t end_offset = (uint64_t)job->info.lbaRange.endlba * SECTOR_SIZE;
     uint64_t offset = base_offset;
     uint64_t start_time = current_ms();
-
-    lseek(job->fd, (off_t)base_offset, SEEK_SET);
+    if (job->type == JOB_SEQ_READ){
+        lseek(job->fd, (off_t)base_offset, SEEK_SET);
+    }
 
     while(!job->stop){
+
         if((job->info.duration_ms > 0) && ((current_ms() - start_time) >= job->info.duration_ms)){
             break;
         }
-        // Perform I/O operation 
-        if(offset + BLOCK_SIZE > end_offset){
-            // If the next block would go past the end of the range, wrap around to the start
-            offset = base_offset;
-            lseek(job->fd, (off_t)base_offset, SEEK_SET);
-        }
-        ssize_t io_size;
-        if(job->is_write){
-            io_size = write_unaligned(job->fd, offset, offset + BLOCK_SIZE, job->buf);
-            if(io_size < 0){
-                fprintf(stderr, "[perf] : Write I/O error at offset %lu : %s\n", offset, strerror(errno));
-                break;
-            }
-            offset += BLOCK_SIZE;
-        } else {
-            io_size = read(job->fd, job->buf, BLOCK_SIZE);
-            if(io_size < 0){
-                fprintf(stderr, "[perf] : Read I/O error at offset %lu : %s\n", offset, strerror(errno));
-                break;
-            }
-            offset += (uint64_t)io_size;
-            if (offset + BLOCK_SIZE > end_offset) {
-                offset = base_offset;
-                lseek(job->fd, (off_t)base_offset, SEEK_SET);
-            }
-        }
 
+        ssize_t io_size;
+        switch(job->type){
+            case JOB_SEQ_WRITE:
+                // Perform I/O operation 
+                if(offset + BLOCK_SIZE > end_offset){
+                // If the next block would go past the end of the range, wrap around to the start
+                    offset = base_offset;
+                    //lseek(job->fd, (off_t)base_offset, SEEK_SET);
+                }
+                io_size = write_unaligned(job->fd, offset, offset + BLOCK_SIZE, job->buf);
+                if(io_size < 0){
+                    fprintf(stderr, "[perf] : Write I/O error at offset %lu : %s\n", offset, strerror(errno));
+                    goto done;
+                }
+                offset += BLOCK_SIZE;
+                break;
+        
+            case JOB_SEQ_READ:
+                // Perform I/O operation 
+                if(offset + BLOCK_SIZE > end_offset){
+                // If the next block would go past the end of the range, wrap around to the start
+                    offset = base_offset;
+                    lseek(job->fd, (off_t)base_offset, SEEK_SET);
+                }
+                io_size = read(job->fd, job->buf, BLOCK_SIZE);
+                if(io_size < 0){
+                    fprintf(stderr, "[perf] : Read I/O error at offset %lu : %s\n", offset, strerror(errno));
+                    goto done;
+                }
+                offset += (uint64_t)io_size;
+                break; //offset is already set for sequential jobs
+            case JOB_RAND_WRITE:
+                offset = random_aligned_offset(base_offset, end_offset);
+                io_size = pwrite(job->fd, job->buf, BLOCK_SIZE, (off_t)offset);
+                if (io_size < 0) {
+                    fprintf(stderr, "[perf] rand write error at offset %lu: %s\n",
+                        offset, strerror(errno));
+                    goto done;      
+                }
+                break;                
+            case JOB_RAND_READ:
+                offset = random_aligned_offset(base_offset, end_offset);
+                io_size = pread(job->fd, job->buf, BLOCK_SIZE, (off_t)offset);
+                if (io_size < 0) {
+                    fprintf(stderr, "[perf] rand read error at offset %lu: %s\n",
+                        offset, strerror(errno));
+                    goto done;      
+                }
+                break; 
+
+            default:
+                goto done;
+        }
         job->bytes_done += (uint64_t)io_size;
     }
+
+    done:;
 
     uint64_t total_time = current_ms() - start_time;
     if(total_time == 0){
@@ -238,7 +292,7 @@ static void run_job(job_state *job)
     double elapsed_sec = (double)total_time / 1000.0;
 
     printf("[perf] %s  |  %.2f MiB  |  %.2f MB/s\n",
-           job->is_write ? "SEQ WRITE" : "SEQ READ",
+           job_type_label(job->type),
            mb,
            mb / elapsed_sec);
 
@@ -274,9 +328,6 @@ status_t perfStartSeqWrite(perfJobInfo_t* info){
         return STATUS_FAIL;
     }
 
-    new_job->info = *info;
-    new_job->is_write = SET_WRITE;
-    
     new_job->fd = open("/dev/nvme0n1", O_RDWR  | O_DIRECT);
     if(new_job->fd < 0){
         fprintf(stderr, "[perf] : Failed to open device for sequential writes : %s\n", strerror(errno));
@@ -293,8 +344,11 @@ status_t perfStartSeqWrite(perfJobInfo_t* info){
 
     memset(new_job->buf, 0xAB, BLOCK_SIZE);
 
-    new_job->bytes_done = 0;
-    new_job->stop = 0;
+    new_job->info = *info;
+   // new_job->is_write = SET_WRITE;
+    new_job->type = JOB_SEQ_WRITE;
+    // new_job->bytes_done = 0;
+    // new_job->stop = 0;
     current_job = new_job;
 
     run_job(current_job);
@@ -324,10 +378,7 @@ status_t perfStartSeqRead(perfJobInfo_t* info){
     job_state *new_job = calloc(1, sizeof(*new_job));
     if(new_job == NULL){
         return STATUS_FAIL;
-    }
-
-    new_job->info = *info;
-    new_job->is_write = SET_READ;
+    }   
     
     new_job->fd = open("/dev/nvme0n1", O_RDONLY  | O_DIRECT);
     if(new_job->fd < 0){
@@ -344,8 +395,11 @@ status_t perfStartSeqRead(perfJobInfo_t* info){
         return STATUS_FAIL;
     }
 
-    new_job->bytes_done = 0;
-    new_job->stop = 0;
+    new_job->info = *info;
+    new_job->type = JOB_SEQ_READ;
+    // new_job->is_write = SET_READ;
+    // new_job->bytes_done = 0;
+    // new_job->stop = 0;
     current_job = new_job;
 
     run_job(current_job);
@@ -357,15 +411,78 @@ status_t perfStartRandWrite(perfJobInfo_t *info){
     if(info == NULL){
         return STATUS_FAIL;
     }
+    if(current_job != NULL){
+        return STATUS_FAIL;
+    }
+    if(info->lbaRange.endlba <= info->lbaRange.startlba){
+        return STATUS_FAIL;
+    }
 
+    job_state *new_job = calloc(1, sizeof(*new_job));
+    if(new_job == NULL){
+        return STATUS_FAIL;
+    }
+
+    new_job->fd = open("/dev/nvme0n1", O_RDWR  | O_DIRECT);
+    if(new_job->fd < 0){
+        fprintf(stderr, "[perf] : Failed to open device for sequential writes : %s\n", strerror(errno));
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    if(posix_memalign(&new_job->buf, BUFFER_ALIGN, BLOCK_SIZE) != 0){
+        fprintf(stderr, "[perf] : Failed to allocate aligned buffer for random writes : %s\n", strerror(errno));
+        close(new_job->fd);
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    memset(new_job->buf, 0xAB, BLOCK_SIZE);
+    new_job->info = *info;
+    new_job->type = JOB_RAND_WRITE;
+    current_job = new_job;
+    run_job(current_job);
     return STATUS_OK;
 }
 
 status_t perfStartRandRead(perfJobInfo_t* info){
+    
     if(info == NULL){
         return STATUS_FAIL;
     }
 
+    if(current_job != NULL){
+        return STATUS_FAIL;
+    }
+    if(info->lbaRange.endlba <= info->lbaRange.startlba){
+        return STATUS_FAIL;
+    }
+
+    job_state *new_job = calloc(1, sizeof(*new_job));
+    if(new_job == NULL){
+        return STATUS_FAIL;
+    }   
+    
+    new_job->fd = open("/dev/nvme0n1", O_RDONLY  | O_DIRECT);
+    if(new_job->fd < 0){
+        fprintf(stderr, "[perf] : Failed to open device for sequential reads : %s\n", strerror(errno));
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    
+    if(posix_memalign(&new_job->buf, BUFFER_ALIGN, BLOCK_SIZE) != 0){
+        fprintf(stderr, "[perf] : Failed to allocate aligned buffer for sequential reads : %s\n", strerror(errno));
+        close(new_job->fd);
+        free(new_job);
+        return STATUS_FAIL;
+    }
+
+    new_job->info = *info;
+    new_job->type = JOB_RAND_READ;
+    current_job = new_job;
+    run_job(current_job);
+    
     return STATUS_OK;
 }
 
