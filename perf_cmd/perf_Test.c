@@ -12,7 +12,7 @@
 #include <errno.h>
 #include "perfInterface.h"
 
-#define SECTOR_SIZE   512
+#define SECTOR_SIZE    512 
 #define BLOCK_SIZE    1048576
 #define BUFFER_ALIGN  4096
 #define VERIFY_PATTERN 0xAB
