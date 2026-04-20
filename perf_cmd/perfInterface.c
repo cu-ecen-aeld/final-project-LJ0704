@@ -3,7 +3,7 @@
     @Author Zane Mcmorris & Likhita Jonnakuti
     @date April 1, 2026
 */
-
+#define _GNU_SOURCE
 #include "perfInterface.h"
 
 #define SET_WRITE 1
@@ -60,6 +60,7 @@ int getPerfStatus(){
     return 1;
 }
 
+/*Just for print statement*/
 static const char *job_type_label(job_type_t type)
 {
     switch(type){
@@ -138,7 +139,6 @@ static ssize_t write_unaligned(int fd, uint64_t start_byte, uint64_t end_byte,
     uint64_t       total  = 0;
     uint64_t       cursor = start_byte;
 
-    /* ── head: partial first sector ─────────────────────────────────────── */
     uint32_t head_off = cursor % SECTOR_SIZE;
     if (head_off != 0) {
         uint64_t sector_base     = cursor - head_off;
@@ -185,7 +185,6 @@ static ssize_t write_unaligned(int fd, uint64_t start_byte, uint64_t end_byte,
         data   += ret;
     }
 
-    /* ── tail: partial last sector ──────────────────────────────────────── */
     if (cursor < end_byte) {
         uint32_t patch_len = (uint32_t)(end_byte - cursor);
 
@@ -407,6 +406,7 @@ status_t perfStartSeqRead(perfJobInfo_t* info){
     return STATUS_OK;
 }
 
+
 status_t perfStartRandWrite(perfJobInfo_t *info){
     if(info == NULL){
         return STATUS_FAIL;
@@ -445,6 +445,14 @@ status_t perfStartRandWrite(perfJobInfo_t *info){
     return STATUS_OK;
 }
 
+/**
+ * @brief Starts listed operation, taking in info about the job
+ * function name: perfStartRandRead
+ * description:   Starts a sequential read job with the given parameters. Will run until duration_ms is up or until perfStopJob is called, whichever comes first.
+ * parameters:    perfJobInfo_t* info - pointer to struct containing info about the job, including LBA range and duration      
+ * Returns:       STATUS_FAIL if job cannot be started for some reason (invalid input, job already running, etc)
+ *                STATUS_OK if job is successfully started
+ */
 status_t perfStartRandRead(perfJobInfo_t* info){
     
     if(info == NULL){
